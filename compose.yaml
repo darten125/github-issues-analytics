@@ -110,6 +110,10 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    environment:
+      <<: *airflow-environment
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_CREATED_SINCE: ${GITHUB_CREATED_SINCE:-2023-01-01T00:00:00Z}
     depends_on:
       airflow-init:
         condition: service_completed_successfully

@@ -1,8 +1,10 @@
 # GitHub Issues Analytics
 
-Учебное аналитическое хранилище для жизненного цикла GitHub Issues из `Kotlin/kotlinx.coroutines`, `ktorio/ktor` и `android/nowinandroid`. Планируемая выборка: Issues, созданные с 1 января 2023 года, без Pull Requests, с доступной историей изменений. Целевой поток: GitHub REST API → STG → DDS → CDM → Metabase, под управлением Apache Airflow.
+Учебное аналитическое хранилище для жизненного цикла GitHub Issues из `Kotlin/kotlinx.coroutines`, `ktorio/ktor` и `android/nowinandroid`. Выборка: Issues, созданные с 1 января 2023 года, без Pull Requests, с доступной историей изменений. Целевой поток: GitHub REST API → STG → DDS → CDM → Metabase, под управлением Apache Airflow.
 
-Сейчас в репозитории есть только инфраструктура. DAG, загрузка GitHub API, таблицы и преобразования STG/DDS/CDM будут добавляться отдельно.
+Инфраструктура Docker Compose/PostgreSQL, загрузчик STG с миграциями и ручной Airflow DAG для STG реализованы. Полная выгрузка 18.10.2026 завершилась с `succeeded/verified` для всех трёх репозиториев: **993 уникальных Issues и 4 552 уникальных события**. Подробности, идентификаторы партий и ограничения приведены в [отчёте о полной загрузке](STG_FULL_LOAD_REPORT.md). Преобразования DDS/CDM разрабатываются другими участниками и пока не подключены к DAG.
+
+Для передачи проекта команде подготовлены [контракт STG → DDS](docs/STG_DDS_CONTRACT.md), [настройка окружения участника](docs/TEAM_SETUP.md) и [план будущей интеграции Airflow](docs/AIRFLOW_INTEGRATION.md). Инструкции первоначального развёртывания сохранены ниже.
 
 ## Состав окружения
 
@@ -50,7 +52,7 @@
 
    `config --quiet` проверяет подстановку переменных и Compose-синтаксис, не выводя пароли. Первый запуск скачивает образы и инициализирует базы; Metabase может запускаться несколько минут. Сервис `airflow-init` должен завершиться с кодом `0`, остальные — быть `healthy`.
 
-5. Откройте [Airflow](http://localhost:8080) и войдите с `AIRFLOW_ADMIN_USERNAME` / `AIRFLOW_ADMIN_PASSWORD` из `.env`. Откройте [Metabase](http://localhost:3000) и пройдите первоначальную настройку. Если во время настройки Metabase вы добавляете аналитическую базу, укажите хост `analytics-db`, порт `5432`, имя базы `github_issues`, пользователя `analytics` и пароль `ANALYTICS_DB_PASSWORD` из `.env`. Пока в схемах нет таблиц.
+5. Откройте [Airflow](http://localhost:8080) и войдите с `AIRFLOW_ADMIN_USERNAME` / `AIRFLOW_ADMIN_PASSWORD` из `.env`. Откройте [Metabase](http://localhost:3000) и пройдите первоначальную настройку. Аналитический источник пока не подключайте: таблиц CDM ещё нет. После их появления Metabase должна читать только `cdm` через отдельную роль PostgreSQL с правами чтения. Для будущего подключения внутри Compose используются хост `analytics-db`, порт `5432` и база `github_issues`; административный пользователь `analytics` не предназначен для BI.
 
 ## Проверка и управление
 
@@ -91,6 +93,210 @@ docker compose down
 - `tests/stg/`, `tests/dds/`, `tests/cdm/` — тесты по зонам ответственности.
 
 В контейнерах Airflow каталоги `dags`, `src` и `sql` смонтированы только для чтения. Python-код из `src` импортируется как `src.stg`, `src.dds` или `src.cdm`; SQL доступен по `/opt/airflow/sql`. Отдельные изменения DDS/CDM могут добавляться без изменения конфигурации Compose.
+
+## Ручной запуск STG через Airflow
+
+DAG `github_issues_stg` управляет существующим Python-загрузчиком STG непосредственно в контейнере Airflow. Автоматическое расписание отключено (`schedule=None`, `catchup=False`); одновременно допускается только один запуск и одна задача DAG. Для `all` три репозитория обрабатываются строго по порядку: `Kotlin/kotlinx.coroutines` → `ktorio/ktor` → `android/nowinandroid`. Каждый выбранный репозиторий получает свою партию и проверку результата. Задачи для невыбранных репозиториев завершаются без обращения к GitHub.
+
+После запуска Compose откройте [Airflow](http://localhost:8080), войдите с учётной записью из `.env` и найдите `github_issues_stg` в списке DAG. При первом создании DAG может быть на паузе; включите его в интерфейсе. Отсутствие расписания сохраняется и после включения. Нажмите **Trigger DAG** и проверьте параметры в форме:
+
+| Параметр | По умолчанию | Назначение |
+| --- | --- | --- |
+| `repository` | `Kotlin/kotlinx.coroutines` | Один из трёх репозиториев либо `all` в указанном порядке. |
+| `mode` | `backfill` | `backfill` возобновляет первоначальную загрузку; `sync` проверяет изменённые Issues; `audit` принудительно перечитывает `/events`. |
+| `created_since` | `2023-01-01T00:00:00Z` | Включительная граница создания Issue с часовым поясом. |
+| `max_issues` | `8` | Положительное ограничение на каждый репозиторий; `null` означает отсутствие ограничения. |
+| `full_load` | `false` | Явное разрешение полной загрузки. |
+
+Безопасная проверка — оставить значения по умолчанию и запустить DAG вручную. При `full_load=false` значение `max_issues=null` запрещено. При `full_load=true` обязательно задайте `max_issues=null` (в форме Airflow это JSON `null`); сочетание с числовым лимитом также запрещено. Проверка происходит в первой задаче **до любых запросов GitHub**. `Param` ограничивает значения в форме, а задача `validate_run` дополнительно проверяет сочетания и дату по фактическим параметрам этого запуска.
+
+Цепочка задач: `validate_run` → `check_resources` (токен и PostgreSQL) → `prepare_stg_schema` (миграции 001–003) → `load_kotlin` → `verify_kotlin` → `load_ktor` → `verify_ktor` → `load_nowinandroid` → `verify_nowinandroid` → `summarize`. Проверка каждого репозитория читает его `batch_id` из PostgreSQL. Для выборки нужны `status=succeeded` и `issue_scan_status=sample`; для полной загрузки — `status=succeeded` и `issue_scan_status=verified`. Если полный обход завершил HTTP-запросы, но наборы Issue ID не стабилизировались (`unverified`), проверка завершится ошибкой и следующие репозитории не начнутся. `verified` означает практическое совпадение наборов ID в контрольных проходах, а не абсолютную гарантию отсутствия изменений GitHub между запросами.
+
+Откройте запуск DAG в Airflow: в графе выберите задачу и вкладку **Logs** для её сообщений. `load_*` сохраняет `batch_id`, а `verify_*` показывает статус и счётчики; XCom содержит только эти небольшие технические данные, без исходных JSON. В PostgreSQL проверьте последнюю партию:
+
+```sql
+SELECT batch_id, repository_full_name, load_mode, status, issue_scan_status,
+       issue_scan_passes, issues_selected, events_fetched,
+       issue_versions_inserted, event_versions_inserted, started_at, finished_at
+FROM stg.load_batches
+ORDER BY started_at DESC LIMIT 10;
+```
+
+При ошибке посмотрите логи неуспешной задачи и состояние партии. После устранения причины запустите DAG вручную с теми же параметрами или очистите неуспешную задачу в интерфейсе Airflow для повтора. Повтор загрузки создаёт новую партию; `backfill` использует существующее возобновление завершённых историй и не очищает STG. Задачи загрузки имеют не более одного повтора через 15 минут после неуспеха; клиент GitHub отдельно выполняет ограниченные повторы отдельных временно неудачных запросов. Не запускайте параллельно CLI-загрузчик для той же выборки.
+
+Первоначальная полная загрузка уже выполнена; её результат зафиксирован в [отчёте](STG_FULL_LOAD_REPORT.md). Для нового пустого окружения или повторной выгрузки сначала оцените лимиты GitHub API и проверьте малую выборку; затем вручную выберите `repository` (один репозиторий или `all`), `mode=backfill`, `full_load=true`, `max_issues=null`. После каждого репозитория проверьте `status=succeeded`, `issue_scan_status=verified` и незавершённые попытки `/events` по запросам ниже. DDS/CDM следует подключать после успешной проверки STG, не используя партии `sample` как подтверждение полного охвата.
+
+## Загрузка STG
+
+В `.env` задайте `GITHUB_TOKEN` с доступом на чтение публичных Issues. Для создания токена используются [настройки GitHub](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens); не записывайте его в отслеживаемые файлы. `GITHUB_CREATED_SINCE` по умолчанию равен `2023-01-01T00:00:00Z`. Отсутствие токена не мешает запуску инфраструктуры, но команда `load` завершится с ошибкой. После изменения `.env` выполните `docker compose up -d --wait --wait-timeout 600`: Compose пересоздаст scheduler с новыми переменными.
+
+Применить SQL-схему к уже инициализированной базе (без GitHub-токена):
+
+```bash
+docker compose run --rm --no-deps airflow-scheduler python -m src.stg.cli init-db
+```
+
+Команда последовательно применяет `sql/stg/001_create_tables.sql`, `002_observations_and_issue_loads.sql` и `003_audit_and_issue_scan.sql`; все три файла можно выполнять повторно. Загрузчик также применяет их перед загрузкой. Миграции не удаляют прежние строки. Для существующих снимков `002` переносит известные первое и последнее наблюдения, но не может восстановить пропущенные промежуточные наблюдения. Прежние загрузки не получают подтверждения полноты на уровне Issue или контрольного прохода: их события потребуется проверить `backfill`, а полноту перечисления — новым полным запуском без `--max-issues`.
+
+Проверочная загрузка одного репозитория и восьми Issues вместе со всеми доступными страницами их событий:
+
+```bash
+docker compose run --rm --no-deps airflow-scheduler python -m src.stg.cli load --mode backfill --repository Kotlin/kotlinx.coroutines --max-issues 8
+```
+
+`--mode backfill` — режим по умолчанию. Он сохраняет текущие снимки Issues, но не запрашивает `/events` повторно для Issue, по которому уже есть успешный полный обход страниц в `stg.issue_event_loads`. После сбоя повторный запуск вновь проходит список Issues, однако пропускает **истории** завершённых задач; незавершённые обрабатываются с первой страницы. Прогресс хранится по стабильному GitHub `issue_id`, а не номеру страницы. `--max-issues` ограничивает число выбранных Issues для проверки; при повторном запуске с тем же пределом уже обработанные Issues всё ещё входят в эти первые N, поэтому для продолжения полной первоначальной загрузки запускайте команду **без** `--max-issues`. Ограниченный запуск получает статус `issue_scan_status=sample` и не выполняет контрольные проходы.
+
+Для последующих изменений используйте отдельный режим:
+
+```bash
+docker compose run --rm --no-deps airflow-scheduler python -m src.stg.cli load --mode sync --repository Kotlin/kotlinx.coroutines
+```
+
+`sync` вновь просматривает список Issues, сохраняет наблюдения текущих JSON и сравнивает GitHub `updated_at` с временем успешной загрузки событий конкретного Issue. Для новых или изменившихся Issues он заново обходит все страницы `/events`; идентичные события и JSON-снимки не дублируются. Для неизменившихся Issues историю не запрашивает. При отсутствии `updated_at` безопасно повторяет обход. Это простой режим без `since` и курсора: он заново читает страницы **списка** до даты создания, поэтому расходует запросы на большой выборке, но не привязывает продолжение к нестабильному номеру страницы. Он может не заметить событие, которое не меняет `updated_at`; для принудительной сверки используйте `audit`.
+
+```bash
+docker compose run --rm --no-deps airflow-scheduler python -m src.stg.cli load --mode audit --repository Kotlin/kotlinx.coroutines --max-issues 8
+```
+
+`audit` обходит `/events` выбранных Issues независимо от `updated_at`. Каждая попытка фиксируется в `stg.issue_event_loads` с режимом `audit`; повторный ответ без изменений создаёт новое подтверждение обхода, но не новую JSON-версию события. Ограничивайте проверку флагом `--max-issues`; полный `audit` потребует запрос истории каждого Issue.
+
+При запуске **без** `--max-issues` загрузчик делает первый проход списка и до двух контрольных проходов. Он сравнивает наборы глобальных `issue_id` соседних проходов, обрабатывает вновь обнаруженные Issues и выставляет `issue_scan_status=verified` только при совпадении двух последовательных наборов. Если они остаются разными, результат `unverified`, даже если партия завершилась без ошибки. `issue_scan_passes` и `issue_scan_issue_count` показывают число проходов и размер последнего набора. `verified` означает наблюдавшуюся стабильность перечня в этих проходах, а не абсолютную полноту GitHub: страницы не представляют единый снимок во времени и могут измениться позже.
+
+`--repository` можно повторять для выбора нескольких репозиториев, а без него выбираются все три. Дату можно переопределить флагом `--created-since 2023-01-01T00:00:00Z` или через `.env`. Полную выгрузку запускайте только после оценки лимита GitHub API и ресурсного бюджета. Предыдущая полная загрузка выполнена через Airflow DAG, а не через CLI.
+
+Клиент выполняет только `GET /repos/{owner}/{repo}`, `GET /repos/{owner}/{repo}/issues` и `GET /repos/{owner}/{repo}/issues/{issue_number}/events`. Для Issues он задаёт `state=all`, `sort=created`, `direction=desc`, `per_page=100`; следующие страницы берутся из заголовка `Link`. Pull Requests исключаются по полю `pull_request`. Загрузка прекращается при достижении `created_at` старше границы, поскольку список сортируется по времени создания. Параметр GitHub `since` здесь не используется: он фильтрует по времени **последнего обновления**, а не создания. Страницы сохраняются последовательно, без накопления всей выгрузки в памяти. Временные сетевые ошибки, HTTP 429/5xx и 403, связанный с rate limit, повторяются не более трёх раз с учётом `Retry-After` и `X-RateLimit-Reset`. Если требуемое ожидание превышает 120 секунд, загрузка завершается ошибкой для последующего запуска.
+
+### Таблицы и повторные загрузки
+
+| Таблица | Зерно и ключ | Назначение |
+| --- | --- | --- |
+| `stg.load_batches` | `batch_id` (UUID) | Статус, режим (`load_mode`), время, счётчики и итог сверки списка Issues (`issue_scan_status`, `issue_scan_passes`, `issue_scan_issue_count`) |
+| `stg.repositories_raw` | `snapshot_id`; уникально `(repository_id, payload_sha256)` | JSONB-снимки репозитория |
+| `stg.issues_raw` | `snapshot_id`; уникально `(issue_id, payload_sha256)` | JSONB-снимки Issue, номер внутри репозитория отдельно от GitHub ID |
+| `stg.issue_events_raw` | `snapshot_id`; уникально `(event_id, payload_sha256)` | JSONB-снимки событий из `/events` |
+| `stg.repository_observations`, `stg.issue_observations`, `stg.event_observations` | `observation_id`; уникально `(batch_id, snapshot_id)` | Один факт наблюдения конкретной JSON-версии за одну партию |
+| `stg.issue_event_loads` | `(batch_id, issue_id)` | Режим, начало, завершение, ошибка и число событий полного обхода `/events` для Issue |
+
+Хеш вычисляется из канонического JSON. Одинаковый ответ повторно не вставляется: у существующего снимка обновляются `last_seen_at` и `last_batch_id`. Изменённый JSON получает новый снимок, прежнее состояние остаётся доступным. Одновременно записывается наблюдение со ссылкой на `snapshot_id` и `batch_id`. Повторная обработка той же версии в одной партии не создаёт второй записи наблюдения. Поэтому A → B → A в трёх партиях даёт два снимка и три наблюдения. `last_seen_at` — совместимое со старой схемой поле; точную известную последовательность после миграции читайте по таблице наблюдений. В событиях `github_created_at` — время события на GitHub, а `observed_at` — время нашего наблюдения. Счётчики `*_versions_inserted` показывают число новых уникальных снимков, а не наблюдений.
+
+Для каждого обрабатываемого Issue создаётся строка `stg.issue_event_loads` со статусом `running` **до** запроса `/events`. Сохранение страницы событий и увеличение `events_fetched` этой строки выполняются одной транзакцией. `succeeded` устанавливается только после завершения всех страниц; при ошибке — `failed`, уже сохранённые страницы остаются. Последняя успешная загрузка определяется по максимальному `finished_at` среди строк `succeeded`; последняя попытка может быть неуспешной. При аварийном завершении процесса строка партии или Issue может остаться `running` и должна считаться незавершённой. Новый запуск создаёт новую партию и новую попытку, не меняя прежний `running`: запись может принадлежать ещё работающему процессу. `succeeded` подтверждает обход всех доступных страниц **именно `/events` на момент запроса**, а не абсолютно полную историю GitHub Issue.
+
+### Проверка через DBeaver или psql
+
+Из DBeaver подключитесь к `localhost:5433`, базе `github_issues`, пользователю `analytics` и паролю `ANALYTICS_DB_PASSWORD` из `.env`. Из Git Bash можно открыть `docker compose exec analytics-db psql -U analytics -d github_issues`. Примеры запросов:
+
+```sql
+SELECT batch_id, repository_full_name, load_mode, status,
+       issue_scan_status, issue_scan_passes, issue_scan_issue_count,
+       started_at, finished_at,
+       issues_fetched, issues_selected, issue_versions_inserted,
+       events_fetched, event_versions_inserted, error_count
+FROM stg.load_batches ORDER BY started_at DESC LIMIT 10;
+
+-- Последний полный проход для каждого репозитория. sample и старые legacy не подтверждают список.
+SELECT DISTINCT ON (repository_full_name)
+       repository_full_name, batch_id, load_mode, status,
+       issue_scan_status, issue_scan_passes, issue_scan_issue_count, finished_at
+FROM stg.load_batches
+WHERE issue_scan_status IN ('verified', 'unverified')
+ORDER BY repository_full_name, started_at DESC, batch_id DESC;
+
+-- Партии, оставшиеся running. Возраст сам по себе не доказывает остановку процесса.
+SELECT batch_id, repository_full_name, load_mode, status,
+       issue_scan_status, started_at, now() - started_at AS age
+FROM stg.load_batches
+WHERE status = 'running'
+ORDER BY started_at;
+
+-- Незавершённые попытки получения /events, включая партии с иным статусом.
+SELECT l.batch_id, b.repository_full_name, b.status AS batch_status,
+       l.issue_id, l.mode, l.status AS issue_status,
+       l.started_at, now() - l.started_at AS age
+FROM stg.issue_event_loads l
+JOIN stg.load_batches b USING (batch_id)
+WHERE l.status = 'running'
+ORDER BY l.started_at;
+
+-- Последнее наблюдавшееся состояние одного Issue.
+SELECT i.issue_id, i.issue_number, i.raw_json, o.observed_at, o.batch_id
+FROM stg.issue_observations o
+JOIN stg.issues_raw i ON i.snapshot_id = o.snapshot_id
+WHERE i.issue_id = 123456789 -- замените на нужный GitHub issue_id
+ORDER BY o.observed_at DESC, o.observation_id DESC LIMIT 1;
+
+-- Последовательность известных наблюдений, включая A → B → A.
+SELECT o.observation_id, o.batch_id, o.observed_at,
+       i.snapshot_id, i.payload_sha256, i.raw_json->>'state' AS state
+FROM stg.issue_observations o
+JOIN stg.issues_raw i ON i.snapshot_id = o.snapshot_id
+WHERE i.issue_id = 123456789
+ORDER BY o.observed_at, o.observation_id;
+
+-- Уникальные события одного Issue: последнее наблюдавшееся JSON-состояние каждого event_id.
+WITH latest_event AS (
+    SELECT DISTINCT ON (e.event_id)
+           e.event_id, e.issue_id, e.event_type, e.github_created_at,
+           e.raw_json, o.observed_at
+    FROM stg.issue_events_raw e
+    JOIN stg.event_observations o ON o.snapshot_id = e.snapshot_id
+    WHERE e.issue_id = 123456789
+    ORDER BY e.event_id, o.observed_at DESC, o.observation_id DESC
+)
+SELECT * FROM latest_event ORDER BY github_created_at, event_id;
+
+-- Issues с незавершённой или ещё не подтверждённой историей для актуального updated_at.
+WITH latest_issue AS (
+    SELECT DISTINCT ON (i.issue_id) i.issue_id, i.repository_id, i.issue_number,
+           (i.raw_json->>'updated_at')::timestamptz AS issue_updated_at
+    FROM stg.issues_raw i
+    JOIN stg.issue_observations o ON o.snapshot_id = i.snapshot_id
+    ORDER BY i.issue_id, o.observed_at DESC, o.observation_id DESC
+)
+SELECT i.*, l.status, l.events_fetched, l.error_message
+FROM latest_issue i
+LEFT JOIN LATERAL (
+    SELECT status, issue_updated_at, events_fetched, error_message
+    FROM stg.issue_event_loads l WHERE l.issue_id = i.issue_id
+    ORDER BY started_at DESC, batch_id DESC LIMIT 1
+) l ON true
+WHERE l.status IS DISTINCT FROM 'succeeded'
+   OR i.issue_updated_at IS NULL
+   OR l.issue_updated_at IS DISTINCT FROM i.issue_updated_at;
+
+-- Только Issues с подтверждённым успешным обходом /events для текущего updated_at.
+WITH latest_issue AS (
+    SELECT DISTINCT ON (i.issue_id) i.issue_id, i.repository_id, i.issue_number,
+           i.raw_json, (i.raw_json->>'updated_at')::timestamptz AS issue_updated_at
+    FROM stg.issues_raw i
+    JOIN stg.issue_observations o ON o.snapshot_id = i.snapshot_id
+    ORDER BY i.issue_id, o.observed_at DESC, o.observation_id DESC
+)
+SELECT i.issue_id, i.repository_id, i.issue_number, i.raw_json,
+       l.finished_at AS last_successful_event_load_at
+FROM latest_issue i
+JOIN LATERAL (
+    SELECT status, issue_updated_at, finished_at
+    FROM stg.issue_event_loads l WHERE l.issue_id = i.issue_id
+    ORDER BY started_at DESC, batch_id DESC LIMIT 1
+) l ON true
+WHERE l.status = 'succeeded'
+  AND i.issue_updated_at IS NOT NULL
+  AND l.issue_updated_at = i.issue_updated_at;
+```
+
+Для DDS выбирайте репозиторий только если его **последняя полная партия** имеет `status='succeeded'` и `issue_scan_status='verified'`. Ограниченные `sample` и старые `legacy` не подтверждают перечень. Для каждого Issue отдельно проверяйте успешную попытку `/events` для текущего `updated_at`; приведённый выше консервативный запрос требует, чтобы успешной была именно последняя попытка. `running` и `failed` проверяйте отдельно, не переводите в `succeeded` по возрасту записи: сначала убедитесь, что соответствующий процесс действительно завершён. При `unverified` повторите полный проход или исследуйте изменения списка, прежде чем считать охват подтверждённым.
+
+Для тестов без токена:
+
+```bash
+MSYS_NO_PATHCONV=1 docker compose run --rm --no-deps -v "$(pwd -W)/tests:/opt/airflow/tests:ro" airflow-scheduler python -m unittest discover -s tests/stg -v
+```
+
+Для интеграционного теста записи в текущий PostgreSQL добавьте `-e STG_INTEGRATION=1` перед `-v`. Тест использует временные идентификаторы и удаляет свои строки после проверки.
+
+### Границы данных
+
+`/issues/{number}/events` и [`/issues/{number}/timeline`](https://docs.github.com/en/rest/issues/timeline) возвращают разные наборы активности. Нужные для аналитики переходы [`closed` и `reopened` документированы для `/events`](https://docs.github.com/en/rest/using-the-rest-api/issue-event-types). В STG сохраняются **все полученные страницы `/events`**, но не комментарии и не все типы timeline-событий; это не исчерпывающая история каждого изменения Issue. У GitHub нет снимка страниц на одну точку времени: при изменениях репозитория во время долгой загрузки возможны сдвиги пагинации, поэтому даже успешный статус не доказывает, что не было пропусков. Контрольные проходы сравнивают наборы ID и обнаруживают часть таких сдвигов, но совпадение двух наборов не является математической гарантией. Наблюдения фиксируют только состояния, реально полученные загрузчиком. Для SCD2 на следующем этапе нужно учитывать эти ограничения и различать время GitHub-события и время нашего наблюдения. Разработчику DDS следует связывать объекты по глобальным `issue_id`/`event_id`, а `issue_number` использовать вместе с `repository_id`; для выбора текущего состояния применять `stg.issue_observations`, а для отбора подтверждённых историй — `stg.issue_event_loads` вместе с `stg.load_batches`.
 
 ## Основа конфигурации
 
