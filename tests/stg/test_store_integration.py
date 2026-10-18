@@ -3,8 +3,12 @@ import random
 import unittest
 from datetime import datetime, timezone
 
+import psycopg2
+
 from src.stg.loader import load_repository
 from src.stg.store import StgStore
+
+CUTOFF = datetime(2023, 1, 1, tzinfo=timezone.utc)
 
 
 @unittest.skipUnless(os.getenv("STG_INTEGRATION") == "1", "requires running analytics PostgreSQL")
@@ -155,7 +159,7 @@ class StoreIntegrationTests(unittest.TestCase):
         batches = []
         try:
             for title in ("A", "B", "A"):
-                batch_id = store.start_batch("test/stg-observations")
+                batch_id = store.start_batch("test/stg-observations", created_since=CUTOFF)
                 batches.append(batch_id)
                 store.save_issues(batch_id, issue_id - 1, [
                     {"id": issue_id, "number": 1, "title": title, "created_at": "2024-01-01T00:00:00Z"}
@@ -200,7 +204,7 @@ class StoreIntegrationTests(unittest.TestCase):
         event = {"id": issue_id + 1, "event": "closed", "created_at": "2024-01-02T00:00:00Z"}
         batches = []
         try:
-            first = store.start_batch("test/stg-partial")
+            first = store.start_batch("test/stg-partial", created_since=CUTOFF)
             batches.append(first)
             store.save_issues(first, repository_id, [row], 1)
             store.start_issue_events(first, repository_id, row)
@@ -209,7 +213,7 @@ class StoreIntegrationTests(unittest.TestCase):
             store.finish_batch(first, "failed", "second page failed")
             self.assertFalse(store.has_completed_events(issue_id, row["updated_at"], "backfill"))
 
-            second = store.start_batch("test/stg-partial")
+            second = store.start_batch("test/stg-partial", created_since=CUTOFF)
             batches.append(second)
             store.save_issues(second, repository_id, [row], 1)
             store.start_issue_events(second, repository_id, row)
@@ -253,7 +257,7 @@ class StoreIntegrationTests(unittest.TestCase):
     def test_repeat_is_idempotent_and_change_retains_previous_snapshot(self):
         store = StgStore.from_env()
         base_id = random.randint(8_000_000_000_000_000, 8_999_999_999_000_000)
-        batch_id = store.start_batch("test/stg-fixture")
+        batch_id = store.start_batch("test/stg-fixture", created_since=CUTOFF)
         try:
             repository = {"id": base_id, "full_name": "test/stg-fixture", "name": "before"}
             issue = {"id": base_id + 1, "number": 1, "created_at": "2024-01-01T00:00:00Z", "title": "before"}
@@ -304,6 +308,57 @@ class StoreIntegrationTests(unittest.TestCase):
                     cursor.execute("DELETE FROM stg.load_batches WHERE batch_id = %s", (batch_id,))
             store.close()
 
+
+    def test_boundary_is_recorded_and_legacy_attestation_keeps_status_and_counters(self):
+        import uuid
+
+        store = StgStore.from_env()
+        store.apply_schema()
+        recorded = store.start_batch("test/stg-cohort", created_since=CUTOFF)
+        legacy = str(uuid.uuid4())
+        running = str(uuid.uuid4())
+        columns = ("status, finished_at, issues_selected, issue_scan_status, issue_scan_passes, "
+                   "issue_scan_issue_count, created_since, created_since_source, created_since_evidence")
+        try:
+            with store.connection:
+                with store.connection.cursor() as cursor:
+                    # Rows written before migration 004 receive only the column defaults.
+                    cursor.execute(
+                        "INSERT INTO stg.load_batches (batch_id, repository_full_name, status, finished_at, "
+                        "issues_selected, issue_scan_status, issue_scan_passes, issue_scan_issue_count) "
+                        "VALUES (%s, 'test/stg-cohort', 'succeeded', now(), 7, 'verified', 2, 7), "
+                        "(%s, 'test/stg-cohort', 'running', NULL, 0, 'legacy', 0, 0)", (legacy, running))
+                    cursor.execute("SELECT created_since, created_since_source FROM stg.load_batches "
+                                   "WHERE batch_id = %s", (recorded,))
+                    self.assertEqual((CUTOFF, "recorded"), cursor.fetchone())
+                    cursor.execute(f"SELECT {columns} FROM stg.load_batches WHERE batch_id = %s", (legacy,))
+                    before = cursor.fetchone()
+            self.assertEqual((None, "unknown", None), before[-3:])
+            evidence = "DagRun manual__stg_full_20261018_0152utc conf; STG_FULL_LOAD_REPORT.md"
+            self.assertEqual("attested", store.attest_created_since(legacy, CUTOFF, evidence))
+            self.assertEqual("unchanged", store.attest_created_since(legacy, CUTOFF, "repeat"))
+            later = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            for batch_id, boundary, text in ((legacy, later, evidence), (recorded, later, evidence),
+                                             (running, CUTOFF, evidence), (legacy, CUTOFF, "  ")):
+                with self.subTest(batch_id=batch_id, boundary=boundary), self.assertRaises(ValueError):
+                    store.attest_created_since(batch_id, boundary, text)
+            with store.connection.cursor() as cursor:
+                cursor.execute(f"SELECT {columns} FROM stg.load_batches WHERE batch_id = %s", (legacy,))
+                after = cursor.fetchone()
+            store.connection.rollback()
+            self.assertEqual(before[:6], after[:6])
+            self.assertEqual((CUTOFF, "attested", evidence), after[-3:])
+            with self.assertRaises(psycopg2.IntegrityError), store.connection:
+                with store.connection.cursor() as cursor:
+                    cursor.execute("UPDATE stg.load_batches SET created_since_evidence = NULL "
+                                   "WHERE batch_id = %s", (legacy,))
+        finally:
+            store.connection.rollback()
+            with store.connection:
+                with store.connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM stg.load_batches WHERE batch_id = ANY(%s::uuid[])",
+                                   ([recorded, legacy, running],))
+            store.close()
 
 if __name__ == "__main__":
     unittest.main()

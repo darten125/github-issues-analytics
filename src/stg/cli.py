@@ -28,6 +28,13 @@ def main(argv=None) -> int:
     load.add_argument("--max-issues", type=int, help="Optional per-repository sample limit")
     load.add_argument("--mode", choices=("backfill", "sync", "audit"), default="backfill",
                       help="backfill resumes history, sync refreshes changed Issues, audit rereads all selected events")
+    attest = commands.add_parser(
+        "attest-cohort", help="Confirm the creation boundary of a legacy batch from its saved run configuration")
+    attest.add_argument("--batch-id", required=True, help="UUID of the finished STG batch")
+    attest.add_argument("--created-since", required=True,
+                        help="Boundary from the saved run configuration, e.g. 2023-01-01T00:00:00Z")
+    attest.add_argument("--evidence", required=True,
+                        help="Reference to the saved configuration, e.g. DagRun ID and report path")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -44,6 +51,12 @@ def main(argv=None) -> int:
         except ValueError:
             LOGGER.error("--created-since must be a timestamp with time zone")
             return 1
+    if args.command == "attest-cohort":
+        try:
+            cutoff = parse_github_time(args.created_since)
+        except ValueError:
+            LOGGER.error("--created-since must be a timestamp with time zone")
+            return 1
 
     store = None
     try:
@@ -51,6 +64,15 @@ def main(argv=None) -> int:
         store.apply_schema()
         if args.command == "init-db":
             LOGGER.info("STG schema applied")
+            return 0
+        if args.command == "attest-cohort":
+            try:
+                outcome = store.attest_created_since(args.batch_id, cutoff, args.evidence)
+            except ValueError as exc:
+                # Messages are fixed strings without payloads or credentials.
+                LOGGER.error("Cohort attestation rejected: %s", exc)
+                return 1
+            LOGGER.info("Batch %s cohort boundary %s: %s", args.batch_id, args.created_since, outcome)
             return 0
         client = GitHubClient(token)
         for full_name in args.repository or REPOSITORIES:

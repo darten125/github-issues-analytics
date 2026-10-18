@@ -32,7 +32,8 @@ class LoaderTests(unittest.TestCase):
         class Store:
             status = None
 
-            def start_batch(self, name, mode="backfill"):
+            def start_batch(self, name, mode="backfill", created_since=None):
+                self.created_since = created_since
                 return "batch"
 
             def save_repository(self, *args):
@@ -60,6 +61,8 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             load_repository(Client(), store, "a/b", datetime(2023, 1, 1, tzinfo=timezone.utc), max_issues=1)
         self.assertEqual(store.status, "failed")
+        # The actual CLI/Airflow parameter is recorded on the batch, not a default.
+        self.assertEqual(store.created_since, datetime(2023, 1, 1, tzinfo=timezone.utc))
 
 
 if __name__ == "__main__":

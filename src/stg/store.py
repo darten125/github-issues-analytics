@@ -50,18 +50,51 @@ class StgStore:
                 for path in paths:
                     cursor.execute(path.read_text(encoding="utf-8"))
 
-    def start_batch(self, full_name: str, mode: str = "backfill"):
+    def start_batch(self, full_name: str, mode: str = "backfill", *, created_since: datetime):
         if mode not in ("backfill", "sync", "audit"):
             raise ValueError("invalid load mode")
+        if not isinstance(created_since, datetime) or created_since.utcoffset() is None:
+            raise ValueError("created_since must be a timestamp with time zone")
         batch_id = str(uuid.uuid4())
         with self.connection:
             with self.connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO stg.load_batches (batch_id, repository_full_name, load_mode, status) "
-                    "VALUES (%s, %s, %s, 'running')",
-                    (batch_id, full_name, mode),
+                    "INSERT INTO stg.load_batches (batch_id, repository_full_name, load_mode, status, "
+                    "created_since, created_since_source) VALUES (%s, %s, %s, 'running', %s, 'recorded')",
+                    (batch_id, full_name, mode, created_since),
                 )
         return batch_id
+
+    def attest_created_since(self, batch_id, created_since: datetime, evidence: str) -> str:
+        """Confirm the boundary of a legacy batch; statuses and counters stay untouched."""
+        if not isinstance(created_since, datetime) or created_since.utcoffset() is None:
+            raise ValueError("created_since must be a timestamp with time zone")
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("evidence reference is required")
+        with self.connection:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT status, created_since, created_since_source FROM stg.load_batches "
+                    "WHERE batch_id = %s FOR UPDATE", (str(uuid.UUID(str(batch_id))),))
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("batch not found")
+                status, recorded, source = row
+                if status == "running":
+                    raise ValueError("batch is still running")
+                if source != "unknown":
+                    if recorded != created_since:
+                        raise ValueError(f"batch boundary is already {source} with another value")
+                    return "unchanged"
+                cursor.execute(
+                    "UPDATE stg.load_batches SET created_since = %s, created_since_source = 'attested', "
+                    "created_since_evidence = %s, created_since_attested_at = now() "
+                    "WHERE batch_id = %s AND created_since_source = 'unknown'",
+                    (created_since, evidence.strip(), str(uuid.UUID(str(batch_id)))),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("batch attestation did not affect one row")
+        return "attested"
 
     def record_issue_scan(self, batch_id, status: str, passes: int, issue_count: int):
         if status not in ("sample", "verified", "unverified") or passes < 0 or issue_count < 0:

@@ -5,7 +5,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+from datetime import datetime, timezone
+
 from src.stg.github_client import GitHubApiError
+
+RECORDED = datetime(2023, 1, 1, tzinfo=timezone.utc)
 
 
 BASE = {
@@ -76,7 +80,7 @@ class AdapterTests(unittest.TestCase):
 
         cursor = MagicMock()
         cursor.fetchone.return_value = (
-            "batch-1", "Kotlin/kotlinx.coroutines", "succeeded", "unverified", 3, 8, 8, 30, 0, 0, 0,
+            "batch-1", "Kotlin/kotlinx.coroutines", "succeeded", "unverified", 3, 8, 8, 30, 0, 0, 0, RECORDED, "recorded",
         )
         store = MagicMock()
         store.connection.cursor.return_value.__enter__.return_value = cursor
@@ -93,7 +97,7 @@ class AdapterTests(unittest.TestCase):
 
         cursor = MagicMock()
         cursor.fetchone.return_value = (
-            "batch-2", "Kotlin/kotlinx.coroutines", "succeeded", "sample", 1, 8, 8, 30, 0, 0, 0,
+            "batch-2", "Kotlin/kotlinx.coroutines", "succeeded", "sample", 1, 8, 8, 30, 0, 0, 0, RECORDED, "recorded",
         )
         store = MagicMock()
         store.connection.cursor.return_value.__enter__.return_value = cursor
@@ -111,7 +115,7 @@ class AdapterTests(unittest.TestCase):
             with self.subTest(status=status):
                 cursor = MagicMock()
                 cursor.fetchone.return_value = (
-                    "batch-3", BASE["repository"], status, "sample", 1, 8, 8, 0, 0, 0, 0,
+                    "batch-3", BASE["repository"], status, "sample", 1, 8, 8, 0, 0, 0, 0, RECORDED, "recorded",
                 )
                 store = MagicMock()
                 store.connection.cursor.return_value.__enter__.return_value = cursor
@@ -125,7 +129,7 @@ class AdapterTests(unittest.TestCase):
 
         cursor = MagicMock()
         cursor.fetchone.return_value = (
-            "batch-4", BASE["repository"], "succeeded", "verified", 2, 8, 8, 30, 0, 0, 0,
+            "batch-4", BASE["repository"], "succeeded", "verified", 2, 8, 8, 30, 0, 0, 0, RECORDED, "recorded",
         )
         store = MagicMock()
         store.connection.cursor.return_value.__enter__.return_value = cursor
@@ -134,9 +138,29 @@ class AdapterTests(unittest.TestCase):
             checked = verify_batch(settings, {"repository": BASE["repository"], "batch_id": "batch-4"})
         summary = build_summary(settings, checked, None, None)
         self.assertEqual(summary["batches"][0]["issue_scan_status"], "verified")
+        # The DDS adapter receives the boundary that PostgreSQL recorded for this batch.
+        self.assertEqual(summary["batches"][0]["created_since"], "2023-01-01T00:00:00Z")
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             build_summary(settings, None, None, None)
 
+
+    def test_batch_without_requested_recorded_boundary_fails_verification(self):
+        from src.stg.airflow_adapter import verify_batch
+
+        settings = BASE | {"full_load": True, "max_issues": None, "repositories": [BASE["repository"]]}
+        for boundary, source in ((None, "unknown"), (RECORDED, "attested"),
+                                 (datetime(2026, 1, 1, tzinfo=timezone.utc), "recorded")):
+            with self.subTest(source=source, boundary=boundary):
+                cursor = MagicMock()
+                cursor.fetchone.return_value = (
+                    "batch-5", BASE["repository"], "succeeded", "verified", 2, 8, 8, 30, 0, 0, 0,
+                    boundary, source,
+                )
+                store = MagicMock()
+                store.connection.cursor.return_value.__enter__.return_value = cursor
+                with patch("src.stg.airflow_adapter.StgStore.from_env", return_value=store):
+                    with self.assertRaisesRegex(RuntimeError, "created_since"):
+                        verify_batch(settings, {"repository": BASE["repository"], "batch_id": "batch-5"})
 
 if __name__ == "__main__":
     unittest.main()
