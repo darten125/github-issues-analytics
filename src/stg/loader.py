@@ -35,7 +35,7 @@ def load_repository(client, store, full_name: str, cutoff: datetime,
         raise ValueError("max_issues must be positive")
     if mode not in ("backfill", "sync", "audit"):
         raise ValueError("invalid load mode")
-    batch_id = store.start_batch(full_name, mode=mode)
+    batch_id = store.start_batch(full_name, mode=mode, created_since=cutoff)
     selected_count = 0
     seen_issue_ids = set()
     processed_events_ids = set()

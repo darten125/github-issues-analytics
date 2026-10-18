@@ -21,7 +21,7 @@ class MemoryStore:
         self.saved_events = set()
         self.issue_snapshots = []
 
-    def start_batch(self, name, mode="backfill"):
+    def start_batch(self, name, mode="backfill", created_since=None):
         batch_id = str(len(self.batches) + 1)
         self.batches.append({"id": batch_id, "status": "running", "mode": mode})
         return batch_id

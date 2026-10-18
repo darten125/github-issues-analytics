@@ -2,6 +2,8 @@
 -- and -v batch_id= (latest run per repository), or pass the exact Airflow
 -- batch_id to check that run. Do not count snapshots or observations as
 -- distinct GitHub objects.
+-- STG diagnostics only: DDS publication rules (explicit batches, cohort
+-- boundary, status transitions) are defined in docs/DDS_CONTRACT.md.
 
 -- 1. Unique repositories; keep the most recently observed JSON version.
 SELECT DISTINCT ON (r.repository_id)

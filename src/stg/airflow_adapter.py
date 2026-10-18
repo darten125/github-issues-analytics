@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping
+from datetime import timezone
 from typing import Any
 
 from .config import REPOSITORIES
@@ -124,7 +125,8 @@ def verify_batch(settings: Mapping[str, Any], outcome: dict | None) -> dict | No
                 "b.issue_scan_passes, b.issue_scan_issue_count, b.issues_selected, b.events_fetched, "
                 "b.issue_versions_inserted, b.event_versions_inserted, "
                 "(SELECT count(*) FROM stg.issue_event_loads l "
-                " WHERE l.batch_id = b.batch_id AND l.status <> 'succeeded') "
+                " WHERE l.batch_id = b.batch_id AND l.status <> 'succeeded'), "
+                "b.created_since, b.created_since_source "
                 "FROM stg.load_batches b WHERE b.batch_id = %s::uuid",
                 (batch_id,),
             )
@@ -135,7 +137,8 @@ def verify_batch(settings: Mapping[str, Any], outcome: dict | None) -> dict | No
     if row is None:
         raise RuntimeError(f"STG batch {batch_id} was not found")
     (found_id, found_repository, status, scan_status, passes, issue_count,
-     issues_selected, events_fetched, issue_versions, event_versions, incomplete_attempts) = row
+     issues_selected, events_fetched, issue_versions, event_versions, incomplete_attempts,
+     created_since, created_since_source) = row
     if found_id != batch_id or found_repository != repository:
         raise RuntimeError(f"STG batch {batch_id} does not match the selected repository")
     if status != "succeeded":
@@ -148,6 +151,9 @@ def verify_batch(settings: Mapping[str, Any], outcome: dict | None) -> dict | No
         )
     if incomplete_attempts:
         raise RuntimeError(f"STG batch {batch_id} has {incomplete_attempts} unfinished/failed Issue histories")
+    if (created_since_source != "recorded" or created_since is None
+            or created_since != parse_github_time(settings["created_since"])):
+        raise RuntimeError(f"STG batch {batch_id} did not record the requested created_since boundary")
 
     result = {
         "repository": repository,
@@ -160,6 +166,7 @@ def verify_batch(settings: Mapping[str, Any], outcome: dict | None) -> dict | No
         "events_fetched": events_fetched,
         "issue_versions_inserted": issue_versions,
         "event_versions_inserted": event_versions,
+        "created_since": created_since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     LOGGER.info("Verified STG batch %s for %s: %s, %s, %s Issues, %s events",
                 batch_id, repository, status, scan_status, issues_selected, events_fetched)
