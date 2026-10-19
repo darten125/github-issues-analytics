@@ -17,6 +17,7 @@ x-airflow-common: &airflow-common
     DWH_DB_NAME: ${ANALYTICS_DB_NAME:?Set ANALYTICS_DB_NAME}
     DWH_DB_USER: ${ANALYTICS_DB_USER:?Set ANALYTICS_DB_USER}
     DWH_DB_PASSWORD: ${ANALYTICS_DB_PASSWORD:?Set ANALYTICS_DB_PASSWORD}
+    CDM_READ_PASSWORD: ${CDM_READ_PASSWORD:?Set CDM_READ_PASSWORD in .env}
   volumes:
     - ./dags:/opt/airflow/dags:ro
     - ./src:/opt/airflow/src:ro

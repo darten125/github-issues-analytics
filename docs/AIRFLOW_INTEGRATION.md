@@ -1,5 +1,7 @@
 # Подключение DDS и CDM к Airflow после готовности их кода
 
+> Историческая памятка о точке интеграции. Актуальный DAG уже содержит задачи `publish_dds` и `publish_cdm`; команды и порядок запуска приведены в [README](../README.md), а правила витрин — в [словаре CDM](CDM_METRICS.md).
+
 Этот документ описывает точки интеграции. Существующий DAG и Compose в рамках передачи **не изменяются**; задач DDS/CDM в Airflow пока нет. Полный контракт источника описан в [STG_DDS_CONTRACT.md](STG_DDS_CONTRACT.md). Код DDS и вызываемый адаптер `src.dds.airflow_adapter.run_from_stg_summary(summary)` уже готовы; их интерфейсы описаны в [DDS_CONTRACT.md](DDS_CONTRACT.md).
 
 ## Текущая цепочка STG

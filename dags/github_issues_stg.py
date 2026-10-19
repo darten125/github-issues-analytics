@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from airflow.sdk import Param, dag, get_current_context, task
 
 from src.stg import airflow_adapter
+from src.dds import airflow_adapter as dds_adapter
+from src.cdm import airflow_adapter as cdm_adapter
 from src.stg.config import DEFAULT_CREATED_SINCE, REPOSITORIES
 
 
@@ -67,6 +69,18 @@ def github_issues_stg():
     def summarize(settings, first, second, third):
         return airflow_adapter.build_summary(settings, first, second, third)
 
+    @task(task_id="publish_dds", retries=0)
+    def publish_dds(summary):
+        if not summary["full_load"]:
+            return {"status": "sample_skipped"}
+        return dds_adapter.run_from_stg_summary(summary)
+
+    @task(task_id="publish_cdm", retries=0)
+    def publish_cdm(dds_result):
+        if dds_result["status"] == "sample_skipped":
+            return {"status": "sample_skipped"}
+        return cdm_adapter.run_after_dds(dds_result)
+
     settings = validate_run()
     resources_ready = check_resources(settings)
     schema_ready = prepare_stg_schema(resources_ready)
@@ -83,7 +97,8 @@ def github_issues_stg():
     second_checked >> third_load
     third_checked = verify_one.override(task_id="verify_nowinandroid")(settings, third_load)
 
-    summarize(settings, first_checked, second_checked, third_checked)
+    summary = summarize(settings, first_checked, second_checked, third_checked)
+    publish_cdm(publish_dds(summary))
 
 
 github_issues_stg()
