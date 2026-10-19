@@ -12,13 +12,26 @@ from src.cdm.loader import _days, _duration_days
 
 
 class CdmDayRulesTests(unittest.TestCase):
-    def test_airflow_rejects_incomplete_dds_result(self):
+    def test_airflow_accepts_one_ready_repository(self):
+        from src.cdm.airflow_adapter import run_after_dds
+
+        repositories = [{"repository": "ktorio/ktor", "batch_id": "batch", "run_id": "run"}]
+        with patch("src.cdm.airflow_adapter.load_cdm",
+                   return_value={"status": "unchanged"}) as load:
+            self.assertEqual({"status": "unchanged"}, run_after_dds({
+                "status": "succeeded", "coverage_complete": True,
+                "ready_for_cdm": True, "repositories": repositories,
+            }))
+        load.assert_called_once_with(expected_repositories=repositories)
+
+    def test_airflow_rejects_unready_dds_result(self):
         from src.cdm.airflow_adapter import run_after_dds
 
         with self.assertRaises(CdmError):
-            run_after_dds({"status": "succeeded", "coverage_complete": True,
-                           "ready_for_cdm": True,
-                           "repositories": [{"repository": "ktorio/ktor"}]})
+            run_after_dds({"status": "succeeded", "coverage_complete": False,
+                           "ready_for_cdm": False,
+                           "repositories": [{"repository": "ktorio/ktor",
+                                             "batch_id": "batch", "run_id": "run"}]})
 
     def test_midnight_transition_belongs_to_next_day(self):
         start = datetime(2023, 3, 31, tzinfo=timezone.utc)
@@ -82,6 +95,8 @@ class CdmIntegrationTests(unittest.TestCase):
 
     def test_reference_metrics_idempotence_and_history_change(self):
         from src.cdm.loader import load_cdm, validate_cdm
+        from src.cdm.airflow_adapter import run_after_dds
+        from src.dds.loader import validate_dds
         from src.dds.fixture import ISSUE_IDS
 
         with patch.dict(os.environ, {"CDM_READ_PASSWORD": ""}):
@@ -91,6 +106,11 @@ class CdmIntegrationTests(unittest.TestCase):
             self.assertEqual(first["labels"], 8)
             self.assertEqual(validate_cdm()["status"], "succeeded")
             self.assertEqual(load_cdm()["status"], "unchanged")
+            single_repository = validate_dds(expected_batch_ids=[self.batch_ids[0]])
+            self.assertTrue(single_repository["coverage_complete"])
+            self.assertTrue(single_repository["ready_for_cdm"])
+            self.assertEqual(1, len(single_repository["repositories"]))
+            self.assertEqual("unchanged", run_after_dds(single_repository)["status"])
             with self.assertRaises(CdmError):
                 load_cdm(expected_repositories=[{
                     "repository": "Kotlin/kotlinx.coroutines",

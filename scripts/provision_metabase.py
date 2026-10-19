@@ -202,7 +202,17 @@ CARDS = (
         WHERE cdm.issue_lifecycle.first_closed_day <= cdm.repository_snapshot.common_last_day
           [[AND {{repository}}]] [[AND {{first_closed_day}}]]
         GROUP BY 1 ORDER BY 1""", ("repository", "first_closed_day")),
-    ("Текущие метки Issues", "bar", "Один Issue считается один раз внутри каждой метки; суммы меток могут превышать число Issues.",
+    ("Топ-15 текущих меток", "row", "15 самых частых пар метка–репозиторий текущего снимка. Полный список ниже; один Issue может иметь несколько меток.",
+     """SELECT cdm.current_issue_label.label_name || ' · ' || cdm.repository_snapshot.full_name
+                  AS label_repository,
+               count(DISTINCT cdm.current_issue_label.issue_id) AS issues
+        FROM cdm.current_issue_label
+        JOIN cdm.repository_snapshot ON cdm.repository_snapshot.repository_id = cdm.current_issue_label.repository_id
+        WHERE 1=1 [[AND {{repository}}]]
+        GROUP BY cdm.current_issue_label.label_name, cdm.repository_snapshot.full_name
+        ORDER BY issues DESC, label_repository
+        LIMIT 15""", ("repository",)),
+    ("Текущие метки Issues", "table", "Все пары репозиторий–метка. Issue считается один раз внутри метки, но может иметь несколько меток, поэтому сумма строк может превышать число Issues.",
      """SELECT cdm.repository_snapshot.full_name AS repository,
                cdm.current_issue_label.label_name AS label,
                count(DISTINCT cdm.current_issue_label.issue_id) AS issues
@@ -273,8 +283,8 @@ def ensure_dashboards(api, collection_id, card_ids):
          "Динамика по полным UTC-дням; временной фильтр относится к отчётной дате.", "report_day"),
         ("Первое закрытие по месяцам", [CARDS[5][0]],
          "Месячная медиана; временной фильтр относится к дате первого закрытия.", "first_closed_day"),
-        ("Текущие метки Issues", [CARDS[6][0], CARDS[7][0]],
-         "Метки текущего снимка; исторический фильтр даты неприменим.", None),
+        ("Текущие метки Issues", [CARDS[6][0], CARDS[7][0], CARDS[8][0]],
+         "Топ-15 и полный список меток текущего снимка. Один Issue может иметь несколько меток; исторический фильтр даты неприменим.", None),
     )
     result = {}
     for name, card_names, description, date_tag in definitions:
@@ -297,10 +307,15 @@ def ensure_dashboards(api, collection_id, card_ids):
             mappings = [_mapping("repository", card_id, "repository")]
             if date_tag:
                 mappings.append(_mapping("date", card_id, date_tag))
+            if name == "Текущие метки Issues":
+                row, col, width, height = ((0, 0, 24, 12), (13, 0, 24, 12),
+                                           (26, 0, 24, 5))[index]
+            else:
+                row, col, width, height = (index // 2) * 7, (index % 2) * 12, 12, 6
             dashcards.append({
                 "id": old.get(card_id, -index - 1), "card_id": card_id,
-                "row": (index // 2) * 7, "col": (index % 2) * 12,
-                "size_x": 12, "size_y": 6, "parameter_mappings": mappings,
+                "row": row, "col": col,
+                "size_x": width, "size_y": height, "parameter_mappings": mappings,
             })
         api.call("PUT", f"/api/dashboard/{dashboard_id}", {
             "name": name, "description": description, "collection_id": collection_id,
