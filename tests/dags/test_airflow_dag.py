@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from airflow.dag_processing.dagbag import DagBag
 
@@ -27,11 +28,13 @@ class DagDefinitionTests(unittest.TestCase):
             "validate_run", "check_resources", "prepare_stg_schema",
             "load_kotlin", "verify_kotlin", "load_ktor", "verify_ktor",
             "load_nowinandroid", "verify_nowinandroid", "summarize",
+            "publish_dds", "publish_cdm",
         })
         chain = (
             "validate_run", "check_resources", "prepare_stg_schema",
             "load_kotlin", "verify_kotlin", "load_ktor", "verify_ktor",
             "load_nowinandroid", "verify_nowinandroid", "summarize",
+            "publish_dds", "publish_cdm",
         )
         for upstream, downstream in zip(chain, chain[1:]):
             with self.subTest(upstream=upstream, downstream=downstream):
@@ -45,6 +48,16 @@ class DagDefinitionTests(unittest.TestCase):
         self.assertIs(params["full_load"], False)
         self.assertIn("all", params.get_param("repository").schema["enum"])
         self.assertIn("audit", params.get_param("mode").schema["enum"])
+
+    def test_sample_stops_before_dds_and_cdm(self):
+        tasks = {task.task_id: task for task in self.dag.tasks}
+        with (patch("src.dds.airflow_adapter.run_from_stg_summary") as dds,
+              patch("src.cdm.airflow_adapter.run_after_dds") as cdm):
+            skipped = tasks["publish_dds"].python_callable({"full_load": False})
+            self.assertEqual({"status": "sample_skipped"}, skipped)
+            self.assertEqual(skipped, tasks["publish_cdm"].python_callable(skipped))
+            dds.assert_not_called()
+            cdm.assert_not_called()
 
 
 if __name__ == "__main__":
